@@ -49,8 +49,8 @@ async function authed(req: Request) {
   return acc;
 }
 const cleanColor = (c: unknown) => (COLORS.includes(c as string) ? (c as string) : COLORS[Math.floor(Math.random() * 6)]);
-const publicAccount = (acc: any) => ({ id: acc.id, name: acc.name, order: acc.order || "", color: acc.color, email: acc.email || null, crews: acc.crews || [] });
-const memberOf = (acc: any) => ({ id: acc.id, name: acc.name, order: acc.order || "", color: acc.color });
+const publicAccount = (acc: any) => ({ id: acc.id, name: acc.name, order: acc.order || "", color: acc.color, home: acc.home || null, email: acc.email || null, crews: acc.crews || [] });
+const memberOf = (acc: any) => ({ id: acc.id, name: acc.name, order: acc.order || "", color: acc.color, home: acc.home || null });
 
 async function putTemp(key: string, data: any, minutes: number) {
   await meta().setJSON(`tmp:${key}`, { ...data, exp: Date.now() + minutes * 60000 });
@@ -69,7 +69,7 @@ async function loadCrew(code: string) {
   if (!validCode(code)) return null;
   const r: any = await crews().getWithMetadata(code, { type: "json" });
   if (!r?.data) return null;
-  const g = r.data;
+  const g = normalize(r.data);
   Object.defineProperty(g, "__etag", { value: r.etag || null, enumerable: false, writable: true });
   return g;
 }
@@ -84,6 +84,14 @@ async function saveCrew(g: any) {
   if (etag && res && res.modified === false) throw new Conflict("changed");
   g.__etag = res?.etag || null;
   return g;
+}
+function normalize(g: any) {
+  g.members ||= []; g.hangs ||= []; g.feed ||= [];
+  for (const h of g.hangs) { h.going ||= []; h.maybe ||= []; h.declined ||= []; h.comments ||= []; h.bring ||= []; h.cap ||= 0; }
+  return g;
+}
+function addFeed(g: any, ev: any) {
+  g.feed = [...(g.feed || []), { id: rid(8), at: now(), ...ev }].slice(-80);
 }
 const isMember = (g: any, id: string) => g.members.some((m: any) => m.id === id);
 function preview(g: any) {
@@ -117,6 +125,7 @@ function readHang(b: any, g: any, hostId: string) {
       date: b.date, time: b.time,
       vibe: VIBES.includes(b.vibe) ? b.vibe : VIBES[0],
       note: str(b.note, 240),
+      cap: Number.isInteger(b.cap) && b.cap >= 2 && b.cap <= 30 ? b.cap : 0,
       hostId,
     },
   };
@@ -235,6 +244,33 @@ async function handle(req: Request) {
     return json({ token, user: publicAccount(acc), verified: !!t.email });
   }
 
+  /* calendar file for a hang (the link is only shown to crew members) */
+  if (M === "GET" && p[0] === "crew" && p[2] === "hang" && /\.ics$/i.test(url.pathname)) {
+    const g = await loadCrew(p[1]);
+    const id = (p[3] || "").replace(/\.ics$/i, "");
+    const h = g?.hangs.find((x: any) => x.id === id);
+    if (!h) return new Response("This hang was cancelled.", { status: 404 });
+    const where = h.spot.kind === "york" ? "Thump Coffee York, 549 NW York Dr Suite 200, Bend, OR 97703"
+      : h.spot.kind === "grove" ? "Thump Coffee Grove, 921 NW Mount Washington Dr, Bend, OR 97703"
+      : (() => { const m = g.members.find((x: any) => x.id === h.spot.houseOf); return m ? `${m.name.split(" ")[0]}'s place${m.home?.address ? ", " + m.home.address : ""}` : "House hang"; })();
+    const t = (d: string, tm: string) => d.replace(/-/g, "") + "T" + tm.replace(":", "") + "00";
+    const [hh, mm] = h.time.split(":").map(Number);
+    const endMin = hh * 60 + mm + 90;
+    let endDate = h.date, endTime = `${String(Math.floor(endMin / 60) % 24).padStart(2, "0")}:${String(endMin % 60).padStart(2, "0")}`;
+    if (endMin >= 1440) { const d = new Date(h.date + "T12:00:00Z"); d.setUTCDate(d.getUTCDate() + 1); endDate = d.toISOString().slice(0, 10); }
+    const escI = (x: string) => String(x).replace(/\\/g, "\\\\").replace(/[,;]/g, (c) => "\\" + c).replace(/\n/g, "\\n");
+    const ics = [
+      "BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//CupUp//EN", "CALSCALE:GREGORIAN", "METHOD:PUBLISH",
+      "BEGIN:VEVENT", `UID:${h.id}@cupup`, `DTSTAMP:${new Date().toISOString().replace(/[-:]/g, "").slice(0, 15)}Z`,
+      `DTSTART;TZID=America/Los_Angeles:${t(h.date, h.time)}`, `DTEND;TZID=America/Los_Angeles:${t(endDate, endTime)}`,
+      `SUMMARY:${escI("☕ " + h.title)}`, `LOCATION:${escI(where)}`,
+      `DESCRIPTION:${escI(`${h.vibe} with ${g.name}.${h.note ? " " + h.note : ""}\n${url.origin}/join/${g.code}?h=${h.id}`)}`,
+      "BEGIN:VALARM", "TRIGGER:-PT30M", "ACTION:DISPLAY", "DESCRIPTION:Coffee in 30 minutes", "END:VALARM",
+      "END:VEVENT", "END:VCALENDAR",
+    ].join("\r\n");
+    return new Response(ics, { headers: { "Content-Type": "text/calendar; charset=utf-8", "Content-Disposition": `inline; filename="cupup-${h.id}.ics"`, "Cache-Control": "no-store" } });
+  }
+
   /* everything below needs a signed-in account, except invite previews */
   const acc = await authed(req);
 
@@ -265,6 +301,10 @@ async function handle(req: Request) {
     if (b.name !== undefined) { const n = str(b.name, 40); if (!n) return bad("Your name can't be empty"); acc.name = n; }
     if (b.order !== undefined) acc.order = str(b.order, 60);
     if (b.color !== undefined) acc.color = cleanColor(b.color);
+    if (b.home !== undefined) {
+      const address = str(b.home?.address, 120), note = str(b.home?.note, 160);
+      acc.home = address ? { address, note } : null;
+    }
     await saveAccount(acc);
     for (const code of acc.crews || []) {
       for (let i = 0; i < 4; i++) {
@@ -305,6 +345,7 @@ async function handle(req: Request) {
       if (!member) {
         if (g.members.length >= 60) return bad("This crew is full");
         g.members.push({ ...memberOf(acc), joinedAt: now() });
+        addFeed(g, { type: "join", actor: acc.id });
         await saveCrew(g);
       }
       if (!(acc.crews || []).includes(g.code)) { acc.crews = [...(acc.crews || []), g.code]; await saveAccount(acc); }
@@ -315,7 +356,7 @@ async function handle(req: Request) {
 
     if (M === "POST" && p[2] === "leave") {
       g.members = g.members.filter((m: any) => m.id !== acc.id);
-      for (const h of g.hangs) { h.going = h.going.filter((x: string) => x !== acc.id); h.maybe = h.maybe.filter((x: string) => x !== acc.id); }
+      for (const h of g.hangs) { h.going = h.going.filter((x: string) => x !== acc.id); h.maybe = h.maybe.filter((x: string) => x !== acc.id); h.declined = h.declined.filter((x: string) => x !== acc.id); }
       if (g.ownerId === acc.id && g.members[0]) g.ownerId = g.members[0].id;
       await saveCrew(g);
       acc.crews = (acc.crews || []).filter((c: string) => c !== g.code);
@@ -336,8 +377,9 @@ async function handle(req: Request) {
       const b = await body(req);
       const { hang, error } = readHang(b, g, acc.id);
       if (error) return bad(error);
-      const h = { id: rid(10), ...hang, going: [acc.id], maybe: [], createdAt: now() };
+      const h = { id: rid(10), ...hang, going: [acc.id], maybe: [], declined: [], comments: [], bring: [], changed: null, createdAt: now() };
       g.hangs.push(h);
+      addFeed(g, { type: "hang", actor: acc.id, hangId: h.id });
       await saveCrew(g);
       return json({ crew: g, hang: h });
     }
@@ -348,10 +390,16 @@ async function handle(req: Request) {
 
       if (M === "POST" && p[4] === "rsvp") {
         const b = await body(req);
+        const wasGoing = h.going.includes(acc.id);
+        if (b.status === "going" && !wasGoing && h.cap && h.going.length >= h.cap) return bad(`This one's full (room for ${h.cap}). Mark maybe and the host will see you're keen.`, 409);
+        if (h.hostId === acc.id && b.status !== "going") return bad("You're hosting. Cancel the hang instead if it's off.");
         h.going = h.going.filter((x: string) => x !== acc.id);
         h.maybe = h.maybe.filter((x: string) => x !== acc.id);
+        h.declined = h.declined.filter((x: string) => x !== acc.id);
         if (b.status === "going") h.going.push(acc.id);
         else if (b.status === "maybe") h.maybe.push(acc.id);
+        else if (b.status === "cant") h.declined.push(acc.id);
+        if ((b.status === "going" && !wasGoing) || (b.status === "cant" && wasGoing)) addFeed(g, { type: b.status === "going" ? "in" : "out", actor: acc.id, hangId: h.id });
         await saveCrew(g);
         return json({ crew: g });
       }
@@ -360,7 +408,10 @@ async function handle(req: Request) {
         if (h.hostId !== acc.id) return bad("Only the host can change this hang", 403);
         const { hang, error } = readHang(await body(req), g, acc.id);
         if (error) return bad(error);
+        const fields = ["date", "time", "spot"].filter((k) => JSON.stringify((h as any)[k]) !== JSON.stringify((hang as any)[k]));
+        if (hang.cap && h.going.length > hang.cap) return bad(`${h.going.length} people are already in. Set room for at least that many.`);
         Object.assign(h, hang, { editedAt: now() });
+        if (fields.length) { h.changed = { fields, at: now() }; addFeed(g, { type: "edit", actor: acc.id, hangId: h.id, fields }); }
         await saveCrew(g);
         return json({ crew: g });
       }
@@ -368,6 +419,52 @@ async function handle(req: Request) {
       if (M === "DELETE" && !p[4]) {
         if (h.hostId !== acc.id) return bad("Only the host can cancel this hang", 403);
         g.hangs = g.hangs.filter((x: any) => x.id !== h.id);
+        addFeed(g, { type: "cancel", actor: acc.id, title: h.title, date: h.date });
+        await saveCrew(g);
+        return json({ crew: g });
+      }
+
+      /* chat on a hang */
+      if (M === "POST" && p[4] === "comment" && !p[5]) {
+        const b = await body(req);
+        const text = str(b.text, 400);
+        if (!text) return bad("Write something first");
+        h.comments = [...h.comments, { id: rid(8), by: acc.id, text, at: now() }].slice(-200);
+        addFeed(g, { type: "comment", actor: acc.id, hangId: h.id, text: text.slice(0, 80) });
+        await saveCrew(g);
+        return json({ crew: g });
+      }
+      if (M === "DELETE" && p[4] === "comment" && p[5]) {
+        const c = h.comments.find((x: any) => x.id === p[5]);
+        if (!c) return json({ crew: g });
+        if (c.by !== acc.id && h.hostId !== acc.id) return bad("You can only delete your own messages", 403);
+        h.comments = h.comments.filter((x: any) => x.id !== c.id);
+        await saveCrew(g);
+        return json({ crew: g });
+      }
+
+      /* "who's bringing what" */
+      if (M === "POST" && p[4] === "bring" && !p[5]) {
+        const b = await body(req);
+        const item = str(b.item, 60);
+        if (!item) return bad("What should someone bring?");
+        if (h.bring.length >= 20) return bad("That's a long list already");
+        h.bring.push({ id: rid(8), item, addedBy: acc.id, claimedBy: b.mine ? acc.id : null });
+        await saveCrew(g);
+        return json({ crew: g });
+      }
+      if (M === "POST" && p[4] === "bring" && p[5] && p[6] === "claim") {
+        const it = h.bring.find((x: any) => x.id === p[5]);
+        if (!it) return bad("That item was removed", 404);
+        if (it.claimedBy && it.claimedBy !== acc.id) return bad("Someone already has that covered");
+        it.claimedBy = it.claimedBy === acc.id ? null : acc.id;
+        await saveCrew(g);
+        return json({ crew: g });
+      }
+      if (M === "DELETE" && p[4] === "bring" && p[5]) {
+        const it = h.bring.find((x: any) => x.id === p[5]);
+        if (it && it.addedBy !== acc.id && h.hostId !== acc.id) return bad("Only the host or whoever added it can remove it", 403);
+        h.bring = h.bring.filter((x: any) => x.id !== p[5]);
         await saveCrew(g);
         return json({ crew: g });
       }

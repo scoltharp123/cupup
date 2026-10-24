@@ -233,90 +233,288 @@ function shell() {
       <button class="crew-pill" data-act="crews-sheet" aria-label="Switch crew"><span class="bean" style="width:12px;height:16px"></span><span>${esc(S.crew.name)}</span>${chev}</button>
       <button class="btn soft sm" data-act="invite-sheet">Invite</button>
     </header>
-    ${UI.tab === "hangs" ? hangsView() : UI.tab === "crew" ? crewView() : youView()}
+    ${UI.tab === "hangs" ? (UI.hang ? detailView() : hangsView()) : UI.tab === "crew" ? crewView() : youView()}
   </div>
-  ${UI.tab === "hangs" ? `<button class="btn cherry lg fab" data-act="new-hang">+ Start a hang</button>` : ""}
+  ${UI.tab === "hangs" && !UI.hang ? `<button class="btn cherry lg fab" data-act="new-hang">+ Start a hang</button>` : ""}
   <nav class="tabs" aria-label="Sections"><div class="row">
     ${tabs.map(([k, l, i]) => `<button data-tab="${k}" ${UI.tab === k ? 'aria-current="page"' : ""}>${i}${l}</button>`).join("")}
   </div></nav>`;
 }
 
-function rsvpButtons(h) {
-  const me = S.user.id;
-  const st = h.going.includes(me) ? "going" : h.maybe.includes(me) ? "maybe" : "";
-  return `<div class="rsvp">
-    <button class="going" aria-pressed="${st === "going"}" data-rsvp="going" data-id="${h.id}">${st === "going" ? "You're in" : "I'm in"}</button>
+/* ---------- hang helpers ---------- */
+const PLACES = {
+  york: { name: "Thump York", addr: "549 NW York Dr, Suite 200, Bend, OR 97703", hours: { 0: ["07:00", "17:00"], 6: ["07:00", "17:30"], d: ["06:30", "17:30"] } },
+  grove: { name: "Thump Grove", addr: "921 NW Mount Washington Dr, Bend, OR 97703", hours: { d: ["06:30", "17:00"] } },
+};
+const isHost = (h) => h.hostId === S.user.id;
+const myStatus = (h) => (isHost(h) ? "host" : h.going.includes(S.user.id) ? "going" : h.maybe.includes(S.user.id) ? "maybe" : h.declined.includes(S.user.id) ? "cant" : "");
+const noReply = (h) => S.crew.members.filter((m) => m.id !== h.hostId && !h.going.includes(m.id) && !h.maybe.includes(m.id) && !h.declined.includes(m.id));
+const hangById = (id) => S.crew?.hangs.find((h) => h.id === id);
+function hoursNote(h) {
+  const p = PLACES[h.spot.kind];
+  if (!p) return "";
+  const dow = new Date(h.date + "T12:00:00").getDay();
+  const [open, close] = p.hours[dow] || p.hours.d;
+  if (h.time < open) return `Heads up: ${p.name} opens at ${fmtTime(open)} that day.`;
+  if (h.time >= close) return `Heads up: ${p.name} closes at ${fmtTime(close)} that day.`;
+  const [ch, cm] = close.split(":").map(Number), [th, tm] = h.time.split(":").map(Number);
+  if (ch * 60 + cm - (th * 60 + tm) < 45) return `Heads up: ${p.name} closes at ${fmtTime(close)}.`;
+  return "";
+}
+function mapsUrl(addr) {
+  const q = encodeURIComponent(addr);
+  return /iphone|ipad|macintosh/i.test(navigator.userAgent) ? `https://maps.apple.com/?q=${q}` : `https://www.google.com/maps/search/?api=1&query=${q}`;
+}
+function placeAddr(h) {
+  if (PLACES[h.spot.kind]) return PLACES[h.spot.kind].addr;
+  return member(h.spot.houseOf)?.home?.address || "";
+}
+function orderTally(ids) {
+  const groups = new Map();
+  for (const id of ids) {
+    const m = member(id);
+    if (!m) continue;
+    const key = (m.order || "").trim() || "No usual set";
+    const k = key.toLowerCase();
+    if (!groups.has(k)) groups.set(k, { order: key, people: [] });
+    groups.get(k).people.push(m.id === S.user.id ? "you" : first(m.name));
+  }
+  return [...groups.values()].sort((a, b) => b.people.length - a.people.length || (a.order === "No usual set") - (b.order === "No usual set"));
+}
+const dayOf = (h) => { const ms = atOf(h) - Date.now(); return ms < 3 * 3600000 && ms > -2 * 3600000; };
+const recentChange = (h) => h.changed && Date.now() - Date.parse(h.changed.at) < 4 * 86400000 && !isHost(h);
+function changedText(h) {
+  const f = h.changed.fields;
+  const bits = [];
+  if (f.includes("date") || f.includes("time")) bits.push(`now ${dayWord(h.date)} at ${fmtTime(h.time)}`);
+  if (f.includes("spot")) bits.push(`now at ${spotLine(h)}`);
+  return `Updated: ${bits.join(", ")}`;
+}
+function relTime(iso) {
+  const m = Math.round((Date.now() - Date.parse(iso)) / 60000);
+  if (m < 1) return "just now";
+  if (m < 60) return `${m}m`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h}h`;
+  return `${Math.round(h / 24)}d`;
+}
+
+/* ---------- status + who ---------- */
+function rsvpRow(h, compact) {
+  const st = myStatus(h);
+  if (st === "host") return "";
+  const full = h.cap && h.going.length >= h.cap && st !== "going";
+  return `<div class="rsvp ${compact ? "compact" : ""}">
+    <button class="going" aria-pressed="${st === "going"}" data-rsvp="going" data-id="${h.id}" ${full ? "disabled" : ""}>${st === "going" ? "You're in" : full ? "Full" : "I'm in"}</button>
     <button class="maybe" aria-pressed="${st === "maybe"}" data-rsvp="maybe" data-id="${h.id}">Maybe</button>
-    ${st ? `<button data-rsvp="none" data-id="${h.id}">Can't make it</button>` : ""}
+    <button class="cant" aria-pressed="${st === "cant"}" data-rsvp="cant" data-id="${h.id}">Can't</button>
   </div>`;
 }
-function whoLine(h) {
-  const goers = h.going.map(member).filter(Boolean);
-  const host = member(h.hostId);
-  const parts = [`${goers.length} going`];
+function countLine(h) {
+  const parts = [`${h.going.length}${h.cap ? `/${h.cap}` : ""} in`];
   if (h.maybe.length) parts.push(`${h.maybe.length} maybe`);
-  parts.push(`hosted by ${h.hostId === S.user.id ? "you" : esc(first(host?.name))}`);
-  return `<div class="who"><div class="stack">${goers.slice(0, 6).map((m) => av(m)).join("")}</div><span class="count muted">${parts.join(" · ")}</span></div>`;
+  if (isHost(h)) { const n = noReply(h).length; if (n) parts.push(`${n} no reply`); }
+  return parts.join(" · ");
 }
-function usuals(h) {
-  const goers = h.going.map(member).filter((m) => m && m.order);
-  if (!goers.length) return "";
-  return `<div class="usuals"><span class="label" style="color:inherit;opacity:.8">First one there orders</span>
-    ${goers.map((m) => `<div class="usual"><span>${m.id === S.user.id ? "You" : esc(first(m.name))}</span><span>${esc(m.order)}</span></div>`).join("")}</div>`;
+function stackOf(ids, n = 5) { return `<div class="stack">${ids.map(member).filter(Boolean).slice(0, n).map((m) => av(m)).join("")}</div>`; }
+function statusTag(h) {
+  const st = myStatus(h);
+  return st === "host" ? `<span class="pill host">Hosting</span>` : st === "going" ? `<span class="pill in">You're in</span>` : st === "maybe" ? `<span class="pill maybe">Maybe</span>` : st === "cant" ? `<span class="pill out">Can't</span>` : `<span class="pill ask">Reply</span>`;
 }
-function hostActions(h) {
-  if (h.hostId !== S.user.id) return `<div class="host-actions"><button data-act="share-hang" data-id="${h.id}">Share</button></div>`;
-  return `<div class="host-actions"><button data-act="share-hang" data-id="${h.id}">Share</button><button data-act="edit-hang" data-id="${h.id}">Edit</button><button data-act="cancel-hang" data-id="${h.id}">Cancel hang</button></div>`;
-}
+
+/* ---------- cards ---------- */
 function heroCard(h) {
   const c = colorOf(h.id);
-  return `<article class="hero c-${c}" id="h-${h.id}" style="--hc:var(--${c})">
+  const host = member(h.hostId);
+  return `<article class="hero c-${c}" id="h-${h.id}" data-open="${h.id}" tabindex="0" role="button" aria-label="Open ${esc(h.title)}">
     ${ICONS.heroCup}
-    <span class="eyebrow">Next up · ${esc(untilWord(h))}</span>
+    <span class="eyebrow">${isHost(h) ? "You're hosting" : "Your next hang"} · ${esc(untilWord(h))}</span>
     <h2>${esc(h.title)}</h2>
     <div class="when">${esc(dayWord(h.date))} · ${fmtTime(h.time)}</div>
-    <div class="where">${esc(spotLine(h))}</div>
-    <div class="row"><span class="vibe">${esc(h.vibe)}</span></div>
-    <div class="row">${whoLine(h)}</div>
-    ${h.note ? `<div class="note" style="margin-top:12px">${esc(h.note)}</div>` : ""}
-    ${rsvpButtons(h)}
-    ${usuals(h)}
-    ${hostActions(h)}
+    <div class="where">${esc(spotLine(h))}${isHost(h) ? "" : ` · with ${esc(first(host?.name))}`}</div>
+    ${recentChange(h) ? `<div class="changed">${esc(changedText(h))}</div>` : ""}
+    <div class="row">${stackOf(h.going, 6)}<span class="count">${countLine(h)}</span></div>
+    <div class="row hero-cta"><span class="open-cta">${isHost(h) ? "Manage hang" : "See details"} →</span>${h.comments.length ? `<span class="count">${h.comments.length} message${h.comments.length === 1 ? "" : "s"}</span>` : ""}</div>
   </article>`;
 }
-function hangCard(h) {
+function hangCard(h, { ask } = {}) {
   const c = colorOf(h.id);
   const d = new Date(h.date + "T12:00:00");
-  return `<article class="hang" id="h-${h.id}">
-    <div class="sleeve c-${c}"><span class="dow">${d.toLocaleDateString("en-US", { weekday: "short" })}</span><span class="d">${d.getDate()}</span><span class="m">${d.toLocaleDateString("en-US", { month: "short" })}</span></div>
+  const host = member(h.hostId);
+  return `<article class="hang ${myStatus(h) === "cant" ? "dim" : ""}" id="h-${h.id}">
+    <button class="sleeve c-${c}" data-open="${h.id}" aria-label="Open ${esc(h.title)}"><span class="dow">${d.toLocaleDateString("en-US", { weekday: "short" })}</span><span class="d">${d.getDate()}</span><span class="m">${d.toLocaleDateString("en-US", { month: "short" })}</span></button>
     <div class="body">
-      <div class="title">${esc(h.title)}</div>
-      <div class="meta"><b>${esc(dayWord(h.date))} · ${fmtTime(h.time)}</b> · ${esc(spotLine(h))}</div>
-      <span class="vibe">${esc(h.vibe)}</span>
-      ${whoLine(h)}
-      ${h.note ? `<div class="note">${esc(h.note)}</div>` : ""}
-      ${rsvpButtons(h)}
-      ${usuals(h)}
-      ${hostActions(h)}
+      <button class="hang-link" data-open="${h.id}">
+        <span class="title">${esc(h.title)}</span>
+        <span class="meta"><b>${fmtTime(h.time)}</b> · ${esc(spotLine(h))}${h.spot.houseOf === h.hostId ? "" : ` · ${isHost(h) ? "you're hosting" : `${esc(first(host?.name))} hosting`}`}</span>
+      </button>
+      ${recentChange(h) ? `<div class="changed small-chg">${esc(changedText(h))}</div>` : ""}
+      <div class="who">${stackOf(h.going)}<span class="count">${countLine(h)}</span>${ask ? "" : statusTag(h)}</div>
+      ${ask ? rsvpRow(h, true) : ""}
     </div>
   </article>`;
+}
+
+/* ---------- home ---------- */
+function feedText(ev) {
+  const who = ev.actor === S.user.id ? "You" : first(member(ev.actor)?.name || "Someone");
+  const h = ev.hangId ? hangById(ev.hangId) : null;
+  const t = h ? h.title : ev.title || "a hang";
+  switch (ev.type) {
+    case "join": return `${who} joined the crew`;
+    case "hang": return `${who} started ${t}`;
+    case "in": return `${who} is in for ${t}`;
+    case "out": return `${who} can't make ${t} now`;
+    case "edit": return h ? `${who} changed ${t}: ${dayWord(h.date)} at ${fmtTime(h.time)}, ${spotLine(h)}` : `${who} changed a hang`;
+    case "cancel": return `${who} cancelled ${t}`;
+    case "comment": return `${who} on ${t}: “${ev.text}”`;
+    default: return "";
+  }
+}
+function newsStrip() {
+  const seen = (S.seen || {})[S.crew.code] || S.crew.members.find((m) => m.id === S.user.id)?.joinedAt || "";
+  const evs = (S.crew.feed || []).filter((e) => e.actor !== S.user.id && e.at > seen && (!e.hangId || hangById(e.hangId))).slice(-4).reverse();
+  if (!evs.length) return "";
+  return `<section class="news" aria-label="What's new"><div class="news-head"><span class="label">New since you last looked</span><button class="linkbtn small" data-act="seen">Clear</button></div>
+    ${evs.map((e) => `<button class="news-row" ${e.hangId ? `data-open="${e.hangId}"` : ""}>${av(member(e.actor))}<span>${esc(feedText(e))}</span><span class="muted small">${relTime(e.at)}</span></button>`).join("")}</section>`;
 }
 function hangsView() {
   const list = upcoming();
   if (!list.length) {
-    return `<div class="spacer"></div><div class="empty">
+    return `<div class="spacer"></div>${newsStrip()}<div class="empty">
       ${cups(["butter", "cherry", "matcha"], [56, 80, 66])}
-      <h2 class="h-lg">No hangs yet.</h2>
-      <p class="lede">Start the first one and see who bites. ${S.crew.members.length < 2 ? "Invite a few friends first so someone can say yes." : ""}</p>
+      <h2 class="h-lg">Nothing on the calendar.</h2>
+      <p class="lede">${S.crew.members.length < 2 ? "Invite a few friends, then start the first hang." : "Start a hang and see who's free."}</p>
       <div style="display:flex;gap:10px;flex-wrap:wrap">
         <button class="btn cherry" data-act="new-hang">Start a hang</button>
         ${S.crew.members.length < 2 ? `<button class="btn soft" data-act="invite-sheet">Invite friends</button>` : ""}
       </div>
     </div>`;
   }
-  const [next, ...rest] = list;
-  return `<div class="spacer"></div>${heroCard(next)}
-    ${rest.length ? `<div class="section-head"><h2 class="h-md">Coming up</h2><span class="label">${rest.length} more</span></div><div class="list">${rest.map(hangCard).join("")}</div>` : `<p class="foot">That's everything on the calendar. Start another?</p>`}`;
+  const ask = list.filter((h) => myStatus(h) === "");
+  const mine = list.filter((h) => ["host", "going"].includes(myStatus(h)));
+  const next = mine[0];
+  const rest = list.filter((h) => h !== next && !ask.includes(h));
+  return `<div class="spacer"></div>${newsStrip()}
+    ${ask.length ? `<div class="section-head"><h2 class="h-md">Waiting on your answer</h2><span class="label">${ask.length}</span></div><div class="list">${ask.map((h) => hangCard(h, { ask: true })).join("")}</div>` : ""}
+    ${next ? `<div class="section-head"><h2 class="h-md">${isHost(next) ? "You're hosting next" : "You're going next"}</h2></div>${heroCard(next)}` : ""}
+    ${rest.length ? `<div class="section-head"><h2 class="h-md">Also coming up</h2><span class="label">${rest.length}</span></div><div class="list">${rest.map((h) => hangCard(h)).join("")}</div>` : ""}
+    <p class="foot">Hangs disappear a couple of hours after they start.</p>`;
+}
+
+/* ---------- hang detail ---------- */
+function peopleList(ids, label, withOrder) {
+  if (!ids.length) return "";
+  return `<div class="plist"><span class="label">${label} · ${ids.length}</span>${ids.map(member).filter(Boolean).map((m) => `<div class="prow">${av(m)}<span class="pname">${m.id === S.user.id ? "You" : esc(m.name)}</span>${withOrder ? `<span class="porder">${esc(m.order || "")}</span>` : ""}</div>`).join("")}</div>`;
+}
+function detailView() {
+  const h = hangById(UI.hang);
+  if (!h) { UI.hang = null; return hangsView(); }
+  const c = colorOf(h.id);
+  const host = member(h.hostId);
+  const st = myStatus(h);
+  const addr = placeAddr(h);
+  const isHouse = h.spot.kind === "house";
+  const houseOwner = isHouse ? member(h.spot.houseOf) : null;
+  const tally = orderTally(h.going);
+  const waiting = noReply(h);
+  const hn = hoursNote(h);
+  const quick = dayOf(h) ? ["On my way", "Running 5 late", "Grabbed a table", "Here!"] : ["Can't wait", "Who's driving?", "Want a pastry?"];
+  return `<div class="detail">
+    <button class="btn ghost sm back" data-act="back">← All hangs</button>
+    <header class="dhead c-${c}">
+      ${ICONS.heroCup}
+      <span class="eyebrow">${esc(untilWord(h))} · ${esc(h.vibe)}</span>
+      <h1>${esc(h.title)}</h1>
+      <div class="when">${esc(dayWord(h.date))} · ${fmtTime(h.time)}</div>
+      <div class="where">${esc(spotLine(h))}</div>
+      <div class="by">${av(host)}<span>${isHost(h) ? "You're hosting" : `Hosted by ${esc(host?.name || "a friend")}`}</span></div>
+    </header>
+    ${recentChange(h) ? `<div class="banner">${esc(changedText(h))}</div>` : ""}
+
+    ${st === "host" ? hostPanel(h, tally, waiting) : `
+    <section class="block">
+      <span class="label">Are you in?</span>
+      ${rsvpRow(h)}
+      ${h.cap ? `<span class="muted small">Room for ${h.cap}. ${Math.max(0, h.cap - h.going.length)} spot${h.cap - h.going.length === 1 ? "" : "s"} left.</span>` : ""}
+    </section>`}
+
+    <section class="block">
+      <span class="label">Where</span>
+      <div class="place">
+        <div><b>${esc(spotLine(h))}</b>${addr ? `<div class="muted small sel">${esc(addr)}</div>` : ""}
+          ${isHouse && houseOwner?.home?.note ? `<div class="small">${esc(houseOwner.home.note)}</div>` : ""}
+          ${isHouse && !addr ? (h.spot.houseOf === S.user.id ? `<div class="small muted">Add your address so the crew can find you.</div>` : `<div class="small muted">${esc(first(houseOwner?.name))} hasn't added an address. Ask in the chat below.</div>`) : ""}
+        </div>
+      </div>
+      ${hn ? `<div class="warn">${esc(hn)}</div>` : ""}
+      <div class="btnrow">
+        ${addr ? `<a class="btn soft sm" href="${mapsUrl(addr)}" target="_blank" rel="noopener">Directions</a>` : isHouse && h.spot.houseOf === S.user.id ? `<button class="btn soft sm" data-act="home-sheet">Add my address</button>` : ""}
+        <a class="btn soft sm" href="/api/crew/${S.crew.code}/hang/${h.id}.ics">Add to calendar</a>
+        <button class="btn soft sm" data-act="share-hang" data-id="${h.id}">Share</button>
+      </div>
+      ${h.note ? `<div class="note">${esc(h.note)}</div>` : ""}
+    </section>
+
+    ${st !== "host" ? `<section class="block">
+      <span class="label">Who's coming</span>
+      ${peopleList(h.going, "In", true)}
+      ${peopleList(h.maybe, "Maybe")}
+      ${peopleList(h.declined, "Can't make it")}
+      ${tally.length && st === "going" && !isHouse ? `<div class="tally"><span class="label">If you're first there, the order is</span>${tally.map((t) => `<div class="trow"><b>${t.people.length}×</b><span>${esc(t.order)}</span><span class="muted small">${esc(t.people.join(", "))}</span></div>`).join("")}</div>` : ""}
+    </section>` : ""}
+
+    ${isHouse ? bringBlock(h) : ""}
+
+    <section class="block">
+      <span class="label">Chat</span>
+      <div class="chat">${h.comments.length ? h.comments.map((m) => { const who = member(m.by); const mine = m.by === S.user.id; return `<div class="msg ${mine ? "mine" : ""}">${mine ? "" : av(who)}<div class="bubble"><span class="mwho">${mine ? "You" : esc(first(who?.name || "Someone"))} · ${relTime(m.at)}</span>${esc(m.text)}</div>${mine || isHost(h) ? `<button class="mdel" data-delmsg="${m.id}" data-id="${h.id}" aria-label="Delete message">×</button>` : ""}</div>`; }).join("") : `<p class="muted small" style="margin:0">No messages yet. Say hi, or let people know you're running late.</p>`}</div>
+      <div class="chips">${quick.map((q) => `<button class="chip" data-quick="${esc(q)}" data-id="${h.id}">${esc(q)}</button>`).join("")}</div>
+      <form class="send" data-form="comment"><input class="input" id="c-text" maxlength="400" placeholder="Message the crew" autocomplete="off" aria-label="Message"><button class="btn sm cherry" type="submit">Send</button></form>
+    </section>
+  </div>`;
+}
+function hostPanel(h, tally, waiting) {
+  const isHouse = h.spot.kind === "house";
+  return `<section class="block host">
+    <span class="label">Headcount</span>
+    <div class="counts">
+      <div><b>${h.going.length}${h.cap ? `<small>/${h.cap}</small>` : ""}</b><span>In</span></div>
+      <div><b>${h.maybe.length}</b><span>Maybe</span></div>
+      <div><b>${h.declined.length}</b><span>Can't</span></div>
+      <div><b>${waiting.length}</b><span>No reply</span></div>
+    </div>
+    ${peopleList(h.going, "In", true)}
+    ${peopleList(h.maybe, "Maybe")}
+    ${peopleList(h.declined, "Can't make it")}
+    ${waiting.length ? `<div class="nudge"><div><b>Still waiting on</b><div class="muted small">${esc(waiting.map((m) => first(m.name)).join(", "))}</div></div><button class="btn sm cherry" data-act="nudge" data-id="${h.id}">Nudge them</button></div>`
+      : S.crew.members.length < 2 ? `<div class="nudge"><div><b>Nobody to invite yet</b><div class="muted small">Your crew is just you so far.</div></div><button class="btn sm cherry" data-act="invite-sheet">Invite friends</button></div>` : ""}
+  </section>
+  <section class="block">
+    <span class="label">${isHouse ? "What to make" : "The group order"}</span>
+    ${tally.length ? tally.map((t) => `<div class="trow"><b>${t.people.length}×</b><span>${esc(t.order)}</span><span class="muted small">${esc(t.people.join(", "))}</span></div>`).join("") : `<p class="muted small" style="margin:0">Orders show up here as people say they're in.</p>`}
+    ${tally.length ? `<div class="btnrow"><button class="btn soft sm" data-act="copy-order" data-id="${h.id}">Copy order</button></div>` : ""}
+  </section>
+  <section class="block">
+    <span class="label">Host tools</span>
+    <div class="btnrow">
+      <button class="btn soft sm" data-act="edit-hang" data-id="${h.id}">Edit time or place</button>
+      <button class="btn soft sm" data-act="share-hang" data-id="${h.id}">Share outside the crew</button>
+      <button class="btn ghost sm danger" data-act="cancel-hang" data-id="${h.id}">Cancel hang</button>
+    </div>
+  </section>`;
+}
+function bringBlock(h) {
+  return `<section class="block">
+    <span class="label">Who's bringing what</span>
+    ${h.bring.length ? h.bring.map((it) => { const who = it.claimedBy ? member(it.claimedBy) : null; const mine = it.claimedBy === S.user.id; return `<div class="bring">
+      <span class="bitem">${esc(it.item)}</span>
+      ${who ? `<span class="small ${mine ? "" : "muted"}">${mine ? "You've got it" : `${esc(first(who.name))} has it`}</span>` : `<span class="small muted">Nobody yet</span>`}
+      ${!who || mine ? `<button class="btn sm ${mine ? "soft" : ""}" data-claim="${it.id}" data-id="${h.id}">${mine ? "Undo" : "I'll bring it"}</button>` : ""}
+      ${it.addedBy === S.user.id || isHost(h) ? `<button class="mdel" data-delbring="${it.id}" data-id="${h.id}" aria-label="Remove ${esc(it.item)}">×</button>` : ""}
+    </div>`; }).join("") : `<p class="muted small" style="margin:0">${isHost(h) ? "Add anything you'd like help with, like pastries or oat milk." : "Nothing on the list yet. Offer something below."}</p>`}
+    <form class="send" data-form="bring"><input class="input" id="b-item" maxlength="60" placeholder="${isHost(h) ? "Pastries, oat milk…" : "I'll bring…"}" autocomplete="off" aria-label="Item to bring"><button class="btn sm" type="submit">Add</button></form>
+  </section>`;
 }
 
 function crewView() {
@@ -348,6 +546,9 @@ function youView() {
       <div class="field"><label class="label" for="p-name">Name</label><input class="input" id="p-name" name="name" maxlength="40" required value="${esc(u.name)}" autocomplete="name"></div>
       <div class="field"><label class="label" for="p-order">Your usual order</label><input class="input" id="p-order" name="order" maxlength="60" value="${esc(u.order)}" placeholder="Oat cortado"></div>
       <div class="field"><span class="label">Your color</span><div class="swatches" role="group" aria-label="Color">${COLORS.map((c) => `<button type="button" class="swatch c-${c}" data-color="${c}" aria-label="${c}" aria-pressed="${u.color === c}"></button>`).join("")}</div></div>
+      <div class="field"><label class="label" for="p-addr">Your address (for house hangs)</label><input class="input" id="p-addr" maxlength="120" value="${esc(u.home?.address || "")}" placeholder="Street address" autocomplete="street-address">
+        <span class="muted small">Only your crews see this, and only on hangs at your place.</span></div>
+      <div class="field"><label class="label" for="p-note">Getting in</label><input class="input" id="p-note" maxlength="160" value="${esc(u.home?.note || "")}" placeholder="Side door, dog is friendly, park on the street"></div>
       <p class="err" id="p-err" hidden></p>
       <button class="btn block" type="submit">Save</button>
     </form>
@@ -391,8 +592,9 @@ const SHEETS = {
   hang(s) {
     const edit = s.edit ? S.crew.hangs.find((h) => h.id === s.edit) : null;
     const f = s.f || (s.f = edit
-      ? { title: edit.title, kind: edit.spot.kind, houseOf: edit.spot.houseOf || S.user.id, date: edit.date, time: edit.time, vibe: edit.vibe, note: edit.note }
-      : { title: "", kind: "", houseOf: S.user.id, date: ymd(addDays(new Date(), 1)), time: "09:00", vibe: VIBES[0], note: "" });
+      ? { title: edit.title, kind: edit.spot.kind, houseOf: edit.spot.houseOf || S.user.id, date: edit.date, time: edit.time, vibe: edit.vibe, note: edit.note, cap: edit.cap || 0 }
+      : { title: "", kind: "", houseOf: S.user.id, date: ymd(addDays(new Date(), 1)), time: "09:00", vibe: VIBES[0], note: "", cap: 0 });
+    if (edit && f.cap === undefined) f.cap = edit.cap || 0;
     const days = Array.from({ length: 10 }, (_, i) => addDays(new Date(), i));
     const times = ["07:00", "08:00", "09:00", "10:00", "11:00", "14:00", "16:00"];
     const others = [...S.crew.members].sort((a, b) => (a.id === S.user.id ? -1 : b.id === S.user.id ? 1 : a.name.localeCompare(b.name)));
@@ -414,6 +616,11 @@ const SHEETS = {
         <div class="chips" role="group" aria-label="Time">${times.map((t) => `<button type="button" class="chip" data-time="${t}" aria-pressed="${f.time === t}">${fmtTime(t)}</button>`).join("")}</div>
         <input class="input" type="time" id="h-time" value="${esc(f.time)}" aria-label="Or pick a time">
       </div>
+      ${f.kind && f.kind !== "house" ? (() => { const hn = hoursNote({ spot: { kind: f.kind }, date: f.date, time: f.time }); return hn ? `<div class="warn">${esc(hn)}</div>` : ""; })() : ""}
+      ${f.kind === "house" && f.houseOf === S.user.id && !S.user.home?.address ? `<div class="field"><label class="label" for="h-addr">Your address (only your crew sees it)</label><input class="input" id="h-addr" maxlength="120" placeholder="Street address" autocomplete="street-address"></div>` : ""}
+      <div class="field"><span class="label">Room for</span>
+        <div class="chips" role="group" aria-label="Room for">${[0, 2, 3, 4, 6, 8].map((n) => `<button type="button" class="chip" data-cap="${n}" aria-pressed="${(f.cap || 0) === n}">${n ? n + " people" : "Anyone"}</button>`).join("")}</div>
+      </div>
       <div class="field"><span class="label">Vibe</span>
         <div class="chips" role="group" aria-label="Vibe">${VIBES.map((v) => `<button type="button" class="chip" data-vibe="${esc(v)}" aria-pressed="${f.vibe === v}">${esc(v)}</button>`).join("")}</div>
       </div>
@@ -424,6 +631,15 @@ const SHEETS = {
       <p class="err" id="h-err" hidden></p>
       <button class="btn cherry lg block" type="submit" ${UI.busy ? "disabled" : ""}>${edit ? "Save changes" : "Post hang"}</button>
     </form>`;
+  },
+  home() {
+    return `${head("Your address")}
+      <form class="form" data-form="home">
+        <p class="lede">Shown to your crews only on hangs at your place, with a Directions button.</p>
+        <div class="field"><label class="label" for="home-addr">Street address</label><input class="input" id="home-addr" maxlength="120" value="${esc(S.user.home?.address || "")}" autocomplete="street-address" autofocus></div>
+        <div class="field"><label class="label" for="home-note">Getting in (optional)</label><input class="input" id="home-note" maxlength="160" value="${esc(S.user.home?.note || "")}" placeholder="Side door, dog is friendly"></div>
+        <button class="btn cherry lg block" type="submit">Save</button>
+      </form>`;
   },
   invite() {
     const link = `${location.origin}/join/${S.crew.code}`;
@@ -526,7 +742,7 @@ async function doJoin() {
   UI.busy = true; render();
   try {
     const d = await api(`crew/${code}/join`, { method: "POST" });
-    setCrew(d.crew); UI.pending = null; UI.tab = "hangs"; UI.flash = h || null;
+    setCrew(d.crew); UI.pending = null; UI.tab = "hangs"; UI.hang = h && S.crew?.hangs.some((x) => x.id === h) ? h : null;
     await refreshMe().catch(() => {});
     toast(`You're in ${d.crew.name}.`);
   } catch (e) { toast(e.message); }
@@ -534,29 +750,50 @@ async function doJoin() {
 }
 
 async function rsvp(id, status) {
-  const h = S.crew.hangs.find((x) => x.id === id);
-  if (!h) return;
+  const h = hangById(id);
+  if (!h || myStatus(h) === status) return;
   const me = S.user.id;
-  const was = h.going.includes(me) ? "going" : h.maybe.includes(me) ? "maybe" : "none";
-  if (was === status && status !== "none") status = "none";
-  h.going = h.going.filter((x) => x !== me); h.maybe = h.maybe.filter((x) => x !== me);
-  if (status === "going") h.going.push(me); else if (status === "maybe") h.maybe.push(me);
+  const prev = JSON.stringify([h.going, h.maybe, h.declined]);
+  h.going = h.going.filter((x) => x !== me); h.maybe = h.maybe.filter((x) => x !== me); h.declined = h.declined.filter((x) => x !== me);
+  ({ going: h.going, maybe: h.maybe, cant: h.declined })[status]?.push(me);
   render();
   try {
     const d = await api(`crew/${S.crew.code}/hang/${id}/rsvp`, { method: "POST", body: { status } });
     setCrew(d.crew); render();
-    if (status === "going") toast("You're in. See you there.");
-  } catch (e) { toast(e.message); await refreshCrew().catch(() => {}); render(); }
+    toast(status === "going" ? "You're in. See you there." : status === "maybe" ? "Marked maybe. The host can see it." : "Got it. The host knows you can't make it.");
+  } catch (e) { [h.going, h.maybe, h.declined] = JSON.parse(prev); toast(e.message); render(); }
+}
+
+async function hangAction(id, path, opts, okMsg) {
+  try {
+    const d = await api(`crew/${S.crew.code}/hang/${id}/${path}`, opts);
+    setCrew(d.crew); render(); if (okMsg) toast(okMsg);
+    return true;
+  } catch (e) { toast(e.message); return false; }
+}
+function openHang(id) { UI.hang = id; UI.tab = "hangs"; closeSheet(); render(); window.scrollTo({ top: 0 }); }
+function markSeen() {
+  if (!S.crew) return;
+  S.seen = { ...(S.seen || {}), [S.crew.code]: new Date().toISOString() }; save();
 }
 
 document.addEventListener("click", async (e) => {
-  const t = e.target.closest("button, [data-act='scrim']");
+  const t = e.target.closest("button, [data-open], [data-act='scrim']");
   if (!t) return;
+  if (t.dataset.open && !t.dataset.act) { openHang(t.dataset.open); return; }
   if (t.dataset.act === "scrim") { if (e.target === t) closeSheet(); return; }
   const a = t.dataset.act;
 
-  if (t.dataset.tab) { UI.tab = t.dataset.tab; render(); window.scrollTo({ top: 0 }); return; }
+  if (t.dataset.tab) { if (UI.tab === t.dataset.tab) UI.hang = null; UI.tab = t.dataset.tab; render(); window.scrollTo({ top: 0 }); return; }
   if (t.dataset.rsvp) return rsvp(t.dataset.id, t.dataset.rsvp);
+  if (t.dataset.quick) return hangAction(t.dataset.id, "comment", { method: "POST", body: { text: t.dataset.quick } });
+  if (t.dataset.delmsg) return hangAction(t.dataset.id, `comment/${t.dataset.delmsg}`, { method: "DELETE" });
+  if (t.dataset.claim) return hangAction(t.dataset.id, `bring/${t.dataset.claim}/claim`, { method: "POST" });
+  if (t.dataset.delbring) return hangAction(t.dataset.id, `bring/${t.dataset.delbring}`, { method: "DELETE" });
+  if (t.dataset.cap !== undefined && UI.sheet?.kind === "hang") {
+    const f = UI.sheet.f; f.title = $("#h-title").value; f.note = $("#h-note").value; f.cap = Number(t.dataset.cap);
+    const top = $(".sheet").scrollTop; renderSheet(); $(".sheet").scrollTop = top; return;
+  }
   if (t.dataset.switch) { S.current = t.dataset.switch; S.crew = null; save(); closeSheet(); render(); await refreshCrew().catch((x) => toast(x.message)); render(); return; }
 
   // onboarding sheet
@@ -584,6 +821,21 @@ document.addEventListener("click", async (e) => {
 
   switch (a) {
     case "close": return closeSheet();
+    case "back": UI.hang = null; render(); return;
+    case "seen": markSeen(); render(); return;
+    case "home-sheet": return openSheet("home");
+    case "nudge": {
+      const h = hangById(t.dataset.id);
+      const names = noReply(h).map((m) => first(m.name));
+      const lead = names.length > 2 ? `${names.slice(0, -1).join(", ")} and ${names.slice(-1)}` : names.join(" and ");
+      return shareText(`${lead}, are you in for ${h.title}? ${dayWord(h.date)} at ${fmtTime(h.time)}, ${spotLine(h)}. Tap to answer:`, `${location.origin}/join/${S.crew.code}?h=${h.id}`);
+    }
+    case "copy-order": {
+      const h = hangById(t.dataset.id);
+      const text = orderTally(h.going).map((x) => `${x.people.length}x ${x.order}`).join("\n");
+      try { await navigator.clipboard.writeText(text); toast("Order copied."); } catch { toast("Couldn't copy. Press and hold to select it."); }
+      return;
+    }
     case "onboard": return openSheet("onboard");
     case "signin-sheet": return openSheet("signin");
     case "new-hang": return openSheet("hang");
@@ -604,11 +856,11 @@ document.addEventListener("click", async (e) => {
       return;
     case "share-hang": {
       const h = S.crew.hangs.find((x) => x.id === t.dataset.id);
-      if (h) shareText(`${h.title}: ${dayWord(h.date)} at ${fmtTime(h.time)}, ${spotLine(h)}. You in?`, `${location.origin}/join/${S.crew.code}?h=${h.id}`);
+      if (h) shareText(`☕ ${h.title}: ${dayWord(h.date)} at ${fmtTime(h.time)}, ${spotLine(h)}. ${h.going.length} in so far. You in?`, `${location.origin}/join/${S.crew.code}?h=${h.id}`);
       return;
     }
     case "confirm-cancel":
-      try { const d = await api(`crew/${S.crew.code}/hang/${t.dataset.id}`, { method: "DELETE" }); setCrew(d.crew); closeSheet(); render(); toast("Hang cancelled."); }
+      try { const d = await api(`crew/${S.crew.code}/hang/${t.dataset.id}`, { method: "DELETE" }); setCrew(d.crew); UI.hang = null; closeSheet(); render(); toast("Hang cancelled. The crew will see it's off."); }
       catch (x) { toast(x.message); }
       return;
     case "leave":
@@ -641,7 +893,10 @@ document.addEventListener("input", (e) => {
   }
 });
 
-document.addEventListener("keydown", (e) => { if (e.key === "Escape" && UI.sheet) closeSheet(); });
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && UI.sheet) closeSheet();
+  if (e.key === "Enter" && e.target.matches?.("article[data-open]")) openHang(e.target.dataset.open);
+});
 
 document.addEventListener("submit", async (e) => {
   const form = e.target.closest("form[data-form]");
@@ -677,7 +932,7 @@ document.addEventListener("submit", async (e) => {
     }
     if (kind === "profile") {
       const color = document.querySelector("[data-color][aria-pressed=true]")?.dataset.color || S.user.color;
-      const d = await api("me", { method: "PATCH", body: { name: $("#p-name").value, order: $("#p-order").value, color } });
+      const d = await api("me", { method: "PATCH", body: { name: $("#p-name").value, order: $("#p-order").value, color, home: { address: $("#p-addr").value, note: $("#p-note").value } } });
       S.user = d.user; save();
       await refreshCrew().catch(() => {});
       render(); toast("Saved.");
@@ -686,14 +941,31 @@ document.addEventListener("submit", async (e) => {
       const f = UI.sheet.f;
       f.title = $("#h-title").value.trim(); f.note = $("#h-note").value.trim();
       if (!f.kind) throw Object.assign(new Error("Pick where you're meeting"), { field: "h-err" });
-      const body = { title: f.title || $("#h-title").placeholder, spot: { kind: f.kind, houseOf: f.kind === "house" ? f.houseOf : null }, date: f.date, time: f.time, vibe: f.vibe, note: f.note };
+      const body = { title: f.title || $("#h-title").placeholder, spot: { kind: f.kind, houseOf: f.kind === "house" ? f.houseOf : null }, date: f.date, time: f.time, vibe: f.vibe, note: f.note, cap: f.cap || 0 };
+      const newAddr = $("#h-addr")?.value.trim();
+      if (newAddr) { const u = await api("me", { method: "PATCH", body: { home: { address: newAddr, note: S.user.home?.note || "" } } }); S.user = u.user; save(); }
       if (atOf({ date: f.date, time: f.time }).getTime() < Date.now() - 15 * 60000) throw Object.assign(new Error("That time already passed. Pick a later one."), { field: "h-err" });
       const editing = UI.sheet.edit;
       const d = editing
         ? await api(`crew/${S.crew.code}/hang/${editing}`, { method: "PATCH", body })
         : await api(`crew/${S.crew.code}/hang`, { method: "POST", body });
-      setCrew(d.crew); UI.flash = editing || d.hang?.id; closeSheet(); UI.tab = "hangs"; render();
-      toast(editing ? "Hang updated." : "Hang posted. Your crew can see it now.");
+      setCrew(d.crew); closeSheet(); UI.tab = "hangs"; UI.hang = editing || d.hang?.id; render(); window.scrollTo({ top: 0 });
+      toast(editing ? "Updated. The crew will see what changed." : "Hang posted. Nudge people from here.");
+    }
+    if (kind === "comment") {
+      const v = $("#c-text").value.trim();
+      if (!v) return;
+      if (await hangAction(UI.hang, "comment", { method: "POST", body: { text: v } })) { $("#c-text")?.blur(); document.querySelector(".chat")?.lastElementChild?.scrollIntoView({ block: "nearest" }); }
+    }
+    if (kind === "bring") {
+      const v = $("#b-item").value.trim();
+      if (!v) return;
+      const h = hangById(UI.hang);
+      await hangAction(UI.hang, "bring", { method: "POST", body: { item: v, mine: !isHost(h) } });
+    }
+    if (kind === "home") {
+      const d = await api("me", { method: "PATCH", body: { home: { address: $("#home-addr").value, note: $("#home-note").value } } });
+      S.user = d.user; save(); await refreshCrew().catch(() => {}); closeSheet(); render(); toast("Address saved. Only your crews can see it.");
     }
     if (kind === "redeem") {
       const d = await api("auth/redeem", { method: "POST", body: { code: $("#code").value } });
@@ -724,7 +996,7 @@ async function startJoin(code, h) {
   render();
   try {
     const d = await api(`crew/${code}`);
-    if (d.crew) { setCrew(d.crew); UI.pending = null; UI.tab = "hangs"; UI.flash = h || null; }
+    if (d.crew) { setCrew(d.crew); UI.pending = null; UI.tab = "hangs"; UI.hang = h && S.crew?.hangs.some((x) => x.id === h) ? h : null; }
     else UI.pending.preview = d;
   } catch (e) {
     UI.pending = null;
@@ -758,10 +1030,12 @@ async function boot() {
 /* keep the crew fresh while the app is open */
 setInterval(async () => {
   if (document.hidden || !S.token || !S.current || UI.sheet || UI.busy) return;
+  if (document.activeElement?.matches?.("input, textarea") && document.activeElement.value) return;
   const before = S.crew?.rev;
   try { await refreshCrew(); if (S.crew?.rev !== before) render(); } catch {}
 }, 20000);
 document.addEventListener("visibilitychange", async () => {
+  if (document.hidden && UI.tab === "hangs" && !UI.hang) markSeen();
   if (!document.hidden && S.token && S.current && !UI.sheet) { try { await refreshCrew(); render(); } catch {} }
 });
 
