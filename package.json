@@ -1,0 +1,10 @@
+{
+  "name": "cupup",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@netlify/blobs": "^10.7.13",
+    "@netlify/functions": "^2.8.0"
+  }
+}

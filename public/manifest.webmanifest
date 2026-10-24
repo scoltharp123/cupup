@@ -1,0 +1,10 @@
+{
+  "name": "CupUp",
+  "short_name": "CupUp",
+  "description": "Plan coffee hangs with your friends",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#F1EEF8",
+  "theme_color": "#F1EEF8",
+  "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}
